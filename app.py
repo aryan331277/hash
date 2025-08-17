@@ -32,46 +32,69 @@ index = None
 parent_lookup = {}
 initialized = False
 
-def create_hash_embedding(text, dimension=384):
-    """Create semantic-ish embedding using hash + text features"""
-    # Clean text
-    text = text.lower().strip()
-    words = re.findall(r'\w+', text)
-    
-    # Text features
-    word_count = len(words)
-    char_count = len(text)
-    unique_words = len(set(words))
-    avg_word_len = sum(len(w) for w in words) / max(word_count, 1)
-    
-    # Multiple hash seeds for variety
-    hashes = []
-    for seed in range(0, dimension, 8):
-        hash_input = f"{text}_{seed}_{word_count}_{unique_words}"
-        hash_val = hashlib.md5(hash_input.encode()).hexdigest()
+def create_gemini_embedding(text):
+    """Use Gemini's actual embedding API"""
+    try:
+        if not gemini_model:
+            raise Exception("Gemini not configured")
         
-        # Convert hex to numbers
-        for i in range(0, min(32, dimension - len(hashes)), 4):
-            if len(hashes) >= dimension:
-                break
-            hex_chunk = hash_val[i:i+4]
-            num = int(hex_chunk, 16) / 65535.0 * 2 - 1  # Normalize to [-1, 1]
-            hashes.append(num)
+        # Use Gemini's embedding model
+        import google.generativeai as genai
+        
+        # Gemini has an embedding model
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=text,
+            task_type="retrieval_document"
+        )
+        
+        return result['embedding']
+        
+    except Exception as e:
+        logger.error(f"Gemini embedding error: {str(e)}")
+        # If Gemini embedding fails, use a better hash approach
+        return create_better_hash_embedding(text)
+
+def create_better_hash_embedding(text, dimension=768):
+    """Better hash-based embedding using multiple features"""
+    import hashlib
+    import re
     
-    # Add text feature dimensions
-    while len(hashes) < dimension:
-        feature_idx = len(hashes)
-        if feature_idx % 4 == 0:
-            val = (word_count % 100) / 50.0 - 1
-        elif feature_idx % 4 == 1:
-            val = (char_count % 500) / 250.0 - 1
-        elif feature_idx % 4 == 2:
-            val = (unique_words % 100) / 50.0 - 1
-        else:
-            val = (int(avg_word_len * 10) % 20) / 10.0 - 1
-        hashes.append(val)
+    # Extract meaningful text features
+    words = re.findall(r'\w+', text.lower())
+    sentences = re.split(r'[.!?]+', text)
     
-    return hashes[:dimension]
+    # Text statistics
+    word_count = len(words)
+    sentence_count = len(sentences)
+    avg_word_len = sum(len(w) for w in words) / max(word_count, 1)
+    unique_words = len(set(words))
+    
+    # Common word patterns
+    common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+    common_word_ratio = sum(1 for w in words if w in common_words) / max(word_count, 1)
+    
+    embedding = []
+    
+    # Multiple hash approaches for different semantic aspects
+    for i in range(dimension):
+        if i < 100:  # Word-based features
+            seed_text = f"{''.join(words[j % len(words)] for j in range(i, min(i+3, len(words))))}"
+        elif i < 200:  # Sentence-based features  
+            sent_idx = i % max(sentence_count, 1)
+            seed_text = f"{sentences[sent_idx]}_{i}"
+        elif i < 300:  # Character n-grams
+            start_pos = (i * 3) % max(len(text) - 2, 1)
+            seed_text = text[start_pos:start_pos + 3] + str(i)
+        else:  # Mixed features
+            seed_text = f"{text[:10]}_{word_count}_{i}_{avg_word_len}"
+        
+        # Create hash and normalize
+        hash_val = hashlib.sha256(seed_text.encode()).hexdigest()
+        numeric_val = int(hash_val[:8], 16) / (16**8) * 2 - 1  # [-1, 1]
+        embedding.append(numeric_val)
+    
+    return embedding[:dimension]
 
 def initialize_models():
     """Initialize Pinecone only"""
